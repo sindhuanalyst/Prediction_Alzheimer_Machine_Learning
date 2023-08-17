@@ -1,0 +1,525 @@
+---
+title: "Final Project"
+author: "Sindhuja"
+output: html_document
+---
+
+# Data-Preprocessing
+
+
+```{r}
+library(readr)
+```
+
+```{r}
+PDdata <- read_csv("/Users/sindhujamahalingam/Documents/current_spring_2022/course/1976L/Project_2022/Project data_2022_p2/project_training set_p.csv")
+dim(PDdata)
+class(PDdata)
+```
+
+The "Class" Variable is listed twice so here I am removing the duplicated column.
+
+```{r}
+#library(readr)
+PDdata <- PDdata[!duplicated(as.list(PDdata))]
+dim(PDdata)
+```
+
+Since three samples were taken from each patient, I averaged out the data for each patient into a single observation. Otherwise, the same patient may have correlated values in the training and test set, which may result in underestimating the error. 
+
+```{r}
+#Find the average for all the numerical columns, grouped by ID
+PDavg <- aggregate(PDdata[, 2:ncol(PDdata)], list(PDdata$id), mean)
+dim(PDavg)
+#For some reason, running the above function changes the name of our grouped variable into something like "Group x1". Below I manually change it back to its original column name. 
+colnames(PDavg)[1] <- "id"
+```
+
+
+```{r}
+#Standardize the numerical variables (Excludes ID, gender, and class) using the scale function
+PDavg[c(4:ncol(PDavg))] <- scale(PDavg[c(4:ncol(PDavg))])
+#head(PDavg)
+
+```
+
+
+Recode categorical features and target variable as factor
+```{r}
+#Must recode as factor variable rather than numeric for some of the output below to work correctly.
+
+PDavg$class <- as.factor(PDavg$class)
+PDavg$gender <- as.factor(PDavg$gender)
+
+is.factor(PDavg$class)
+is.factor(PDavg$gender)
+
+
+  
+```
+
+
+Get rid of highly correlated variables. 
+https://machinelearningmastery.com/feature-selection-with-the-caret-r-package/
+
+reduce noise, cutoff 0.75
+```{r}
+
+library(mlbench)
+library(caret)
+
+#Create correlation matrix for the numerical data 
+correlationMatrix <- cor(PDavg[,4:ncol(PDavg)])
+
+#Identify attributes with an absolute correlation of 0.75 or higher by index
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff = 0.75)
+
+#Find the names of the columns based on the indices found in the last step
+highlyCorCol <- colnames(PDavg[,4:ncol(PDavg)])[highlyCorrelated]
+#print(highlyCorCol)
+
+#Create a new filtered PD data frame without the highly correlated variables
+PDfiltered <- PDavg[,-which(colnames(PDavg) %in% highlyCorCol)]
+dim(PDfiltered)
+```
+
+Split the dataset into the training and test set. 
+
+```{r}
+
+set.seed(25)
+
+#In case the filtering wasn't needed.
+#dt = sort(sample(nrow(PDavg), nrow(PDavg)*.7))
+#train <- PDavg[dt,]
+#test <- PDavg[-dt,]
+
+#Split data into training and test set in 70-30 ratio
+dt = sort(sample(nrow(PDfiltered), nrow(PDfiltered)*.7))
+train <- PDfiltered[dt,]
+test <- PDfiltered[-dt,]
+
+```
+
+
+In preparation for feature selection using RFE (Recursive-Feature-Elimination), I may first prepare the data and define our control. RFE is used to identify which features in the data set can be used to predict our target variable, class. 
+
+https://towardsdatascience.com/effective-feature-selection-recursive-feature-elimination-using-r-148ff998e4f7
+
+```{r}
+library("caret")
+library("randomForest")
+library("dplyr")
+library("ggplot2")
+
+
+#Use a random forest, cross validated method to perform RFE. 
+control <- rfeControl(functions = rfFuncs, method = "cv")
+result <- rfe(x = train[,3:ncol(PDfiltered)], y = train$class, sizes = c(1:5, 10, 15, 20), rfeControl = control )
+
+result
+
+ggplot(data = result, metric = "Accuracy") + theme_bw() + xlim(0, 50)
+ggplot(data = result, metric = "Kappa") + theme_bw() + xlim(0, 50)
+
+
+```
+
+Here, I visualized which features are the most important.
+
+```{r}
+varimp_data <- data.frame(feature = row.names(varImp(result))[1:20], importance = varImp(result)[1:20, 1])
+
+ggplot(data = varimp_data, 
+       aes(x = reorder(feature, -importance), y = importance, fill = feature)) +
+  geom_bar(stat="identity") + labs(x = "Features", y = "Variable Importance") + 
+  theme(axis.text.x=element_text(angle=90), legend.position = "none") 
+  
+```
+
+
+Checking the model performance using the test data set. Both accuracy and Kappa values appear to be good. 
+```{r}
+postResample(predict(result, test[,3:ncol(PDfiltered)]), test$class)
+```
+
+
+```{r}
+predictors(result)
+varlist <- predictors(result)
+```
+
+
+```{r}
+print(varlist)
+
+```
+
+Create a new data frame that contains the id, class, and gender combined with the n (changes depending on seed) important features we identified previously. 
+
+```{r}
+#Get the name of the first three columns
+first3cols = names(PDfiltered[1:3])
+
+#Add the names of the first three columns to the names of the 15 variable columns
+string <- c(first3cols, varlist)
+
+#Create new data.frame that consists of all the observations for these 18 total columns. 
+newPD <- PDfiltered[,names(PDfiltered) %in% string]
+head(newPD)
+```
+
+drop gender  
+
+```{r}
+newPD <- newPD[,-which(names(newPD) == "gender")]
+```
+
+create training and test set  
+
+```{r}
+set.seed(2)
+dt = sort(sample(nrow(newPD), nrow(newPD)*.7))
+train <- newPD[dt,]
+test <- newPD[-dt,]
+```
+
+# Random forest
+conduct random forest on training data
+
+
+no cross validation
+
+```{r}
+set.seed(2)
+rf.data <- randomForest(class~.-id, data=train, importance = TRUE, proximity=TRUE)
+print(rf.data)
+plot(rf.data)
+
+```
+
+OOB error is 16.19%  
+
+Prediction and confusion matrix on train data  
+
+```{r}
+p1 <- predict(rf.data, train)
+confusionMatrix(p1, train$class)
+```
+
+train data accuracy is 100%  
+
+prediction and confusion matrix on test data  
+
+```{r}
+p2 <- predict(rf.data, test)
+confusionMatrix(p2, test$class)
+```
+
+Accuracy is 83.1%.  
+
+# kNN
+
+```{r}
+train_scale <- scale(train[, -2])
+test_scale <- scale(test[, -2])
+```
+
+```{r}
+library(class)
+#K=1
+set.seed (1)
+knn.pred <- knn(train = train_scale,
+                      test = test_scale,
+                      cl = train$class,
+                      k = 1)
+
+table(knn.pred , test$class)
+acc <- (5+37)/(5+37+6+5)
+acc
+
+misClassError <- mean(knn.pred != test$class)
+print(paste('Accuracy =', 1-misClassError))
+```
+
+Accuracy is 76.05% for KNN = 1  
+
+```{r}
+# K=3
+set.seed (1)
+knn.pred2 <- knn(train = train_scale,
+                      test = test_scale,
+                      cl = train$class,
+                      k = 3)
+table(knn.pred2 , test$class)
+acc <- (5+41)/(41+5+1+6)
+acc
+
+misClassError2 <- mean(knn.pred2 != test$class)
+print(paste('Accuracy =', 1-misClassError2))
+```
+
+Accuracy is 81.69% for KNN = 3  
+
+```{r}
+# K=5
+set.seed (1)
+
+knn.pred3 <- knn(train = train_scale,
+                      test = test_scale,
+                      cl = train$class,
+                      k = 5)
+table(knn.pred3 , test$class)
+acc <- (42+4)/(4+42+7+0)
+acc
+
+misClassError3 <- mean(knn.pred3 != test$class)
+print(paste('Accuracy =', 1-misClassError3))
+```
+Accuracy is 83.10% for KNN = 5 
+
+```{r}
+# K=8
+set.seed (1)
+
+knn.pred4 <- knn(train = train_scale,
+                      test = test_scale,
+                      cl = train$class,
+                      k = 8)
+table(knn.pred4 , test$class)
+acc <- (42+3)/(3+42+8+0)
+acc
+
+misClassError4 <- mean(knn.pred4 != test$class)
+print(paste('Accuracy =', 1-misClassError4))
+```
+
+Accuracy is 80.28% for KNN = 8
+
+# SVM linear kernel
+
+```{r}
+library(e1071)
+svmfit_linear <-svm(class~.-id, data=train,kernel= "linear", cost= 0.1, scale=FALSE)
+print(svmfit_linear)
+```
+
+
+```{r}
+tune.out <-tune(svm, class~.-id, data=train, kernel= "linear", ranges = list(cost = c(0.001, 0.01, 0.1, 1, 5, 10, 100)))
+summary(tune.out)                
+                
+```
+
+For linear kernel, the lowest cross-validation error is obtained for a cost of 1.
+
+```{r}
+bestmod <- tune.out$best.model 
+summary(bestmod)
+```
+
+```{r}
+train_p <- predict(bestmod, newdata=train)
+train_p
+confusionMatrix(train_p, train$class)
+```
+
+train data accuracy is 90.48% 
+
+```{r}
+test_p <- predict(bestmod, newdata=test)
+test_p
+confusionMatrix(test_p, test$class)
+```
+
+The accuracy test data is 80.28%
+
+# SVM radial kernel
+
+```{r}
+svmfit_radial <-svm(class~.-id, data=train,kernel= "radial", cost=0.01,gamma=0.5, scale=FALSE)
+print(svmfit_radial)
+```
+
+
+```{r}
+tune.out2 <-tune(svm, class~.-id, data=train, kernel= "radial", ranges = list(cost = c(0.001, 0.01, 0.1, 1, 5, 10, 100),gamma=c(0.5,1,2,3,4)))
+summary(tune.out2)  
+
+```
+
+For a radial kernel, the lowest cross-validation error is obtained for a gamma of 0.5 and a cost of 5.
+
+```{r}
+bestmod2 <- tune.out2$best.model 
+summary(bestmod2)
+```
+
+```{r}
+train_p1 <- predict(bestmod2, newdata=train)
+train_p1
+confusionMatrix(train_p1, train$class)
+```
+
+train data accuracy is 100% 
+
+```{r}
+test_p1 <- predict(bestmod2, newdata=test)
+test_p1
+confusionMatrix(test_p1, test$class)
+```
+
+accuracy of test data is 73.24%
+
+# Logistic Regression
+
+```{r}
+glm.fit_train <-glm(class~ .-id ,data =train, family = "binomial" )
+summary(glm.fit_train)
+```
+
+```{r}
+glm.fit_prob.train= predict(glm.fit_train, train, type = "response")
+
+glm.fit.pred.train = rep(0, length(glm.fit_prob.train))
+glm.fit.pred.train[glm.fit_prob.train>0.5] = 1
+
+table(glm.fit.pred.train, train$class)
+
+mean(glm.fit.pred.train == train$class)
+```
+
+Accuracy for training data is 80.95%
+
+```{r}
+glm.fit_prob.test= predict(glm.fit_train, test, type = "response")
+
+glm.fit.pred.test = rep(0, length(glm.fit_prob.test))
+glm.fit.pred.test[glm.fit_prob.test>0.5] = 1
+
+table(glm.fit.pred.test, test$class)
+
+mean(glm.fit.pred.test== test$class)
+```
+
+Accuracy for test data is 80.28% 
+
+# write codes for ROC curve for all models before NN, because NN changes test class
+
+```{r}
+library(ROCR)
+p2 <- as.numeric(p2)
+pred_rf <- prediction(p2, test$class)
+predf_rf <- performance(pred_rf, "tpr", "fpr")
+
+knn.pred3 <- as.numeric(knn.pred3)
+pred_knn <- prediction(knn.pred3, test$class)
+predf_knn <- performance(pred_knn, "tpr", "fpr")
+
+test_p <- as.numeric(test_p)
+pred_p <- prediction(test_p, test$class)
+predf_p <- performance(pred_p, "tpr", "fpr")
+
+test_p1 <- as.numeric(test_p1)
+pred_p1 <- prediction(test_p1, test$class)
+predf_p1 <- performance(pred_p1, "tpr", "fpr")
+
+glm.fit.pred.test <- as.numeric(glm.fit.pred.test)
+pred_glm <- prediction(glm.fit.pred.test, test$class)
+predf_glm <- performance(pred_glm, "tpr", "fpr")
+```
+
+# Neural Network
+
+```{r}
+# Convert class column from to numeric 1/0
+class = as.numeric(newPD$class)-1
+data <- newPD %>% select(id, apq5Shimmer:tqwt_kurtosisValue_dec_27)
+data <- cbind(class, data)
+
+library(caTools)
+set.seed(1)
+
+# Create Split (any column is fine)
+split = sample.split(data$class, SplitRatio=0.60)
+
+# Split based off of split Boolean Vector
+train = subset(data, split == TRUE)
+test = subset(data, split == FALSE)
+
+#install.packages('neuralnet')
+library(neuralnet)
+
+#or
+feats <- names(data[3:17])
+# Concatenate strings
+f <- paste(feats,collapse=' + ')
+f <- paste('class ~',f)
+# Convert to formula
+f <- as.formula(f)
+f
+nn <- neuralnet(f, train, hidden=c(10,10,10), linear.output=FALSE)
+plot(nn)
+
+# Compute Predictions off Test Set
+predicted.nn.values <- compute(nn, test[3:17])
+
+# Check out net.result
+print(head(predicted.nn.values$net.result))
+
+predicted.nn.values$net.result <- sapply(predicted.nn.values$net.result,round,digits=0)
+table(test$class,predicted.nn.values$net.result)
+mean(predicted.nn.values$net.result== test$class)
+```
+
+Accuracy for test set of NN is 80%.
+
+# ROC Curve for NN and generate ROC curve visuals
+
+```{r}
+#predicted.nn1 <-predicted.nn.values$net.result
+#detach(package:neuralnet,unload = T)
+library(ROCR)
+pred_nn <- prediction(predicted.nn1,test$class)
+predf_nn <- performance(pred_nn, "tpr", "fpr")
+
+plot(predf_rf, col= 1)
+plot(predf_knn, add = TRUE, col=2)
+plot(predf_p, add = TRUE, col=3)
+plot(predf_p1, add = TRUE, col = 4)
+plot(predf_glm, add = TRUE, col = 5)
+plot(predf_nn, add = TRUE, col = 6)
+col <- c(1, 2, 3, 4, 5, 6)
+legend("bottomright", c("Random Forest", "KNN", "SVM Linear", "SVM Radial", "Logistic Regression", "Neural Network"), fill=col)
+```
+
+
+
+# test predictions
+
+```{r}
+# first import the test dataset
+PDdata_test <- read.csv("/Users/sindhujamahalingam/Downloads/Project data_2022_p 2/project_test set_p.csv")
+```
+
+```{r}
+# predict
+predict_test <- predict(rf.data, PDdata_test)
+
+output <- cbind(predict_test, PDdata_test)
+
+# remove empty class column and rename predict_test to 
+output <- output %>% select(-class) %>%
+  rename(
+    class = predict_test
+  )
+```
+
+```{r}
+# export 
+readr::write_csv(output, "/Users/sindhujamahalingam/Downloads/Project data_2022_p 2/prediction.csv")
+```
+
+
+
+
